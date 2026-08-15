@@ -1,52 +1,77 @@
-# ZeroCandidatePrime architecture
+# Architecture
 
-This document describes the current source tree only. It is not a proof of an asymptotic complexity claim.
+ZeroCandidatePrime separates four concerns that are allowed to use different algorithms: input/bootstrap, prime admission, successor generation, and post-solve verification.
 
-## Mode separation
+## Execution pipeline
 
-### Fast Bootstrap
+```text
+input or bootstrap
+        |
+        v
+Prime Gate
+        |
+        v
+survivor-recurrence generator
+        |
+        v
+frozen (gap, next prime)
+        |
+        v
+Exact Pass
+```
 
-Fast Bootstrap is intentionally external/traditional. It may use `primecount` or the built-in traditional fallback to resolve a starting `(n, p_n)`. Its internal optimizations are not required to imitate the user generator.
+Only the generator determines the gap. Bootstrap and verification code may use conventional methods, but their search state is not visible to the generator.
 
-### Self Bootstrap
+## Fast Bootstrap
 
-Self Bootstrap starts from `(1, 2)` and repeatedly applies the user's successor recurrence. For each `p_k -> p_(k+1)` transaction, the live prime-dimension state begins again from `q0=2`; the previous successor's dimension state is discarded rather than reused as hidden historical input.
+Fast Bootstrap is an external starting-state resolver. It first attempts `primecount --nth-prime` when that executable is available and otherwise uses the built-in traditional fallback supported by `traditional.c`.
 
-When a working NVIDIA CUDA device is available, the normal 64-bit successor path uses 256 CUDA lanes to project live prime dimensions. If no NVIDIA CUDA device is available, the CPU implementation is the exact fallback. If NVIDIA is detected but the GPU authority path fails initialization, JIT, self-test, or execution, the application reports failure instead of silently changing numerical authority.
+This path is intentionally not rewritten to imitate the survivor recurrence. Its only product for the generator is the resolved starting prime.
 
-### Direct p
+## Prime Gate
 
-After Prime Gate validates the supplied `p_n`, Direct mode performs one fresh successor transaction through the same user-generator core. The post-solve Exact Pass is validation only and does not feed a candidate, factor, or next-prime result back into generation.
+A directly supplied `p_n` is validated before it enters the generator. The gate exports a Boolean admission decision. It does not provide factors, a candidate interval, a prime table, or a precomputed successor.
 
-### Record Experiment
+## Successor generator
 
-The record-seeded experiment starts from the exact external anchor stored in `main.c` and uses 128-bit state. Its causal-depth cap is currently **256**. The experiment is explicitly bounded, so states produced beyond the exact seed are labelled `PROVISIONAL / UNVERIFIED`.
+The generator is implemented independently in `own_solver.c` and in the NVIDIA device program `gpu_kernel.ptx`.
 
-## Matrix-Free and live implicit state
+Its state is based on the nested survivor maps described in [`ALGORITHM.md`](ALGORITHM.md). Prime dimensions are generated from `q_0 = 2` by the recurrence itself. The base dimension uses the same advance-and-divisibility rule as later levels; there is no generator-specific odd-only shortcut.
 
-The user generator does not construct a natural-number candidate interval, candidate-prime pool, or dense/global interaction matrix.
+For the exact 64-bit path, dimensions needed by an active successor transaction may occupy a live workspace because nested `M_k` evaluation must refer to lower levels. This workspace belongs only to that transaction. Self Bootstrap discards it before beginning the next prime-to-prime step.
 
-The recurrence generates prime-dimension values internally from `q0=2`. The exact 64-bit implementation may hold the dimensions required by the current successor in a live workspace because nested lower-level `M` evaluation needs them. That workspace is not an external prime table and is not retained across Self-Bootstrap successor steps.
+The generator does not allocate a natural-number candidate interval or candidate-prime pool, and it does not assemble a dense/global matrix.
 
-The 128-bit record path likewise rebuilds its bounded live dimension workspace for each successor transaction. The fixed workspace is an engineering depth bound, not a proof that the mathematical recursion has constant sequential depth.
+## Direct p
 
-## q0 = 2
+Direct mode performs one successor transaction after the Prime Gate accepts the supplied `p_n`. The transaction starts from fresh generator state.
 
-Inside the user generator, `q0=2` is not implemented as an odd-only shortcut. The base dimension advances by one and applies the same divisibility/survivor rule used by the recurrence. Its natural consequence is that states divisible by 2 do not survive that dimension.
+## Self Bootstrap
 
-Traditional code in `traditional.c` may still use ordinary odd-only optimizations. Those routines belong to Fast Bootstrap, Prime Gate, and Exact Pass, and their internal state does not feed back into the user generator.
+Self Bootstrap begins at `(1, 2)` and repeatedly invokes the same successor transaction. The prime chain is causal, but dimension state from one transaction is not retained as hidden input to the next.
 
-## GPU scope
+## Record-seeded experiment
 
-- NVIDIA Driver API is loaded dynamically.
-- Normal 64-bit GPU projection uses 256 CUDA lanes.
-- The record-seeded 128-bit experiment also launches a 256-thread CTA.
-- Tensor Core is not used.
-- Prime-to-prime successor chaining remains causal.
-- GPU parallelism does not by itself prove scale-independent sequential depth.
+The record experiment uses 128-bit rank and prime state and a fixed live-recursion depth cap. It begins from the exact anchor embedded in `main.c` and skips reconstruction of the history before that anchor.
 
-## Generated and binary files
+The cap is an engineering boundary. Outputs after the exact seed are labelled `PROVISIONAL / UNVERIFIED`, and the experiment does not claim an asymptotic proof.
 
-`source/embed_ptx.py` generates `source/gpu_kernel_ptx.h` from `source/gpu_kernel.ptx` during the build.
+## NVIDIA numerical path
 
-Binary support and release files can be tracked separately, including the application icon/resource, import libraries, and distributable EXE.
+The executable does not link against the CUDA Runtime. `gpu_solver.c` loads `nvcuda.dll` dynamically and calls the CUDA Driver API directly.
+
+The PTX module contains the GPU recurrence and is JIT-loaded through the driver. The normal 64-bit path and the 128-bit record experiment use a 256-thread CTA for live-dimension projection.
+
+The recurrence is integer-based and does not use Tensor Cores.
+
+When an NVIDIA device is detected, initialization and arithmetic self-tests must pass before GPU results are accepted. A detected but broken NVIDIA authority path is reported as an error instead of being silently replaced by a CPU answer. The CPU implementation is used when no NVIDIA CUDA device is present.
+
+## Exact Pass
+
+Exact Pass runs only after the generator result has been frozen. It is allowed to use a conventional next-prime calculation because its role is comparison, not generation. A mismatch is reported rather than used as a correction signal.
+
+## Build boundary
+
+The application is a freestanding native Windows x64 program built from C plus the checked-in PTX device program. `embed_ptx.c` is a host build utility that converts `gpu_kernel.ptx` into the generated `gpu_kernel_ptx.h` string header consumed by `gpu_solver.c`.
+
+Binary resources such as the application icon, Windows resource object, import libraries, and final executable are kept separate from the text-source layer.
