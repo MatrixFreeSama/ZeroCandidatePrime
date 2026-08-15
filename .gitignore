@@ -1,0 +1,23 @@
+# Local build products
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+
+# Generated embedded PTX header
+source/gpu_kernel_ptx.h
+
+# Local editor / IDE state
+.vs/
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Binary support/release files are intentionally not blanket-ignored.
+# zeta.ico, app.res, imports/*.lib and dist/ZeroCandidatePrime.exe may be tracked.

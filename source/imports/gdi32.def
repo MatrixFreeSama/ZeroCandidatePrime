@@ -1,0 +1,6 @@
+LIBRARY GDI32.dll
+EXPORTS
+GetStockObject
+
+SelectObject
+GetTextExtentPoint32W

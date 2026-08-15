@@ -1,0 +1,20 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+ExitProcess
+GetModuleHandleW
+GetProcessHeap
+HeapAlloc
+HeapFree
+CreateThread
+CloseHandle
+GetTickCount64
+CreatePipe
+SetHandleInformation
+CreateProcessW
+ReadFile
+WaitForSingleObject
+GetStdHandle
+GetLastError
+LoadLibraryW
+GetProcAddress
+FreeLibrary

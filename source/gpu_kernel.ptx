@@ -1,0 +1,977 @@
+.version 6.0
+.target sm_52
+.address_size 64
+
+// Exact integer high-dimensional survivor-state recurrence.
+// 256 CUDA lanes project the current survivor across prime dimensions in parallel.
+// Dimension-chain growth and nested survivor jumps remain exact and causal.
+// No floating point and no Tensor Core.
+
+.func (.reg .u32 rv) own_M(
+    .reg .u64 qptr, .reg .u64 count,
+    .reg .u64 flvl, .reg .u64 fcur, .reg .u64 ftotal, .reg .u64 fwait,
+    .reg .u64 level, .reg .u64 x, .reg .u64 maxcount,
+    .reg .u64 outptr, .reg .u64 statsptr)
+{
+    .reg .pred %p<16>;
+    .reg .u32 %r<8>;
+    .reg .u64 %rd<32>;
+
+    setp.ge.u64 %p0, level, count;
+    @%p0 bra OM_fail;
+    setp.ge.u64 %p1, level, maxcount;
+    @%p1 bra OM_fail;
+
+    mov.u64 %rd0, 1;          // depth
+    mov.u64 %rd1, 0;          // ret
+    // frame[0]
+    st.global.u64 [flvl], level;
+    st.global.u64 [fcur], x;
+    st.global.u64 [ftotal], 0;
+    st.global.u64 [fwait], 0;
+
+OM_loop:
+    setp.eq.u64 %p2, %rd0, 0;
+    @%p2 bra OM_done;
+    sub.u64 %rd2, %rd0, 1;   // idx
+    shl.b64 %rd3, %rd2, 3;
+    add.u64 %rd4, flvl, %rd3;
+    add.u64 %rd5, fcur, %rd3;
+    add.u64 %rd6, ftotal, %rd3;
+    add.u64 %rd7, fwait, %rd3;
+    ld.global.u64 %rd8, [%rd4]; // frame level
+    setp.eq.u64 %p3, %rd8, 0;
+    @%p3 bra OM_base;
+
+    ld.global.u64 %rd9, [%rd7];
+    setp.eq.u64 %p4, %rd9, 0;
+    @%p4 bra OM_descend;
+
+    // return from child: total += ret, cur += ret
+    ld.global.u64 %rd10, [%rd6];
+    add.u64 %rd11, %rd10, %rd1;
+    setp.lt.u64 %p5, %rd11, %rd10;
+    @%p5 bra OM_fail;
+    ld.global.u64 %rd12, [%rd5];
+    add.u64 %rd13, %rd12, %rd1;
+    setp.lt.u64 %p6, %rd13, %rd12;
+    @%p6 bra OM_fail;
+    st.global.u64 [%rd6], %rd11;
+    st.global.u64 [%rd5], %rd13;
+
+    // stats.hops++
+    ld.global.u64 %rd14, [statsptr+24];
+    add.u64 %rd14, %rd14, 1;
+    st.global.u64 [statsptr+24], %rd14;
+    // stats.tests++
+    ld.global.u64 %rd15, [statsptr+32];
+    add.u64 %rd15, %rd15, 1;
+    st.global.u64 [statsptr+32], %rd15;
+
+    shl.b64 %rd16, %rd8, 3;
+    add.u64 %rd17, qptr, %rd16;
+    ld.global.u64 %rd18, [%rd17];
+    rem.u64 %rd19, %rd13, %rd18;
+    setp.ne.u64 %p7, %rd19, 0;
+    @%p7 bra OM_return_level;
+    st.global.u64 [%rd7], 0;
+    bra OM_loop;
+
+OM_return_level:
+    mov.u64 %rd1, %rd11;
+    sub.u64 %rd0, %rd0, 1;
+    bra OM_loop;
+
+OM_descend:
+    st.global.u64 [%rd7], 1;
+    // child index = depth. Ensure depth < maxcount.
+    setp.ge.u64 %p8, %rd0, maxcount;
+    @%p8 bra OM_fail;
+    shl.b64 %rd20, %rd0, 3;
+    add.u64 %rd21, flvl, %rd20;
+    add.u64 %rd22, fcur, %rd20;
+    add.u64 %rd23, ftotal, %rd20;
+    add.u64 %rd24, fwait, %rd20;
+    sub.u64 %rd25, %rd8, 1;
+    st.global.u64 [%rd21], %rd25;
+    ld.global.u64 %rd26, [%rd5];
+    st.global.u64 [%rd22], %rd26;
+    st.global.u64 [%rd23], 0;
+    st.global.u64 [%rd24], 0;
+    add.u64 %rd0, %rd0, 1;
+    bra OM_loop;
+
+OM_base:
+    // q0 is not special-cased as parity.  Apply the same survivor rule to
+    // the first implicit dimension: advance one integer, test q0, repeat only
+    // if that state is actually hit.
+    ld.global.u64 %rd27, [%rd5];
+    mov.u64 %rd28, 0;
+    ld.global.u64 %rd30, [qptr];
+OM_base_loop:
+    add.u64 %rd29, %rd27, 1;
+    setp.lt.u64 %p9, %rd29, %rd27;
+    @%p9 bra OM_fail;
+    mov.u64 %rd27, %rd29;
+    add.u64 %rd28, %rd28, 1;
+    ld.global.u64 %rd31, [statsptr+32];add.u64 %rd31,%rd31,1;st.global.u64 [statsptr+32],%rd31;
+    rem.u64 %rd31, %rd27, %rd30;
+    setp.ne.u64 %p10, %rd31, 0;
+    @%p10 bra OM_base_done;
+    ld.global.u64 %rd31, [statsptr+24];add.u64 %rd31,%rd31,1;st.global.u64 [statsptr+24],%rd31;
+    bra OM_base_loop;
+OM_base_done:
+    mov.u64 %rd1, %rd28;
+    sub.u64 %rd0, %rd0, 1;
+    bra OM_loop;
+
+OM_done:
+    st.global.u64 [outptr], %rd1;
+    mov.u32 rv, 1;
+    ret;
+OM_fail:
+    mov.u32 rv, 0;
+    ret;
+}
+
+.func (.reg .u32 rv) gap_existing(
+    .reg .u64 pval, .reg .u64 qptr, .reg .u64 count,
+    .reg .u64 flvl, .reg .u64 fcur, .reg .u64 ftotal, .reg .u64 fwait,
+    .reg .u64 maxcount, .reg .u64 outptr, .reg .u64 tmpptr, .reg .u64 statsptr)
+{
+    .reg .pred %p<16>;
+    .reg .u32 %r<8>;
+    .reg .u64 %rd<32>;
+
+    // Obtain the first q0-survivor through the same recurrence. No odd-only shortcut.
+    mov.u64 %rd0, 0;
+    call.uni (%r1), own_M, (qptr, count, flvl, fcur, ftotal, fwait, %rd0, pval, maxcount, tmpptr, statsptr);
+    setp.eq.u32 %p7, %r1, 0;
+    @%p7 bra GE_fail;
+    ld.global.u64 %rd1, [tmpptr];
+    add.u64 %rd2, pval, %rd1; // candidate
+    setp.lt.u64 %p0, %rd2, pval;
+    @%p0 bra GE_fail;
+    div.u64 %rd3, %rd2, 2;
+    setp.gt.u64 %p1, 2, %rd3;
+    @%p1 bra GE_quick;
+    mov.u64 %rd4, 1; // i
+
+GE_outer:
+    setp.ge.u64 %p2, %rd4, count;
+    @%p2 bra GE_fail;
+    // layers++
+    ld.global.u64 %rd5, [statsptr+0];
+    add.u64 %rd5, %rd5, 1;
+    st.global.u64 [statsptr+0], %rd5;
+    shl.b64 %rd6, %rd4, 3;
+    add.u64 %rd7, qptr, %rd6;
+    ld.global.u64 %rd8, [%rd7]; // q
+
+GE_hitloop:
+    ld.global.u64 %rd9, [statsptr+32];
+    add.u64 %rd9, %rd9, 1;
+    st.global.u64 [statsptr+32], %rd9;
+    rem.u64 %rd10, %rd2, %rd8;
+    setp.ne.u64 %p3, %rd10, 0;
+    @%p3 bra GE_after_hit;
+    sub.u64 %rd11, %rd4, 1;
+    call.uni (%r0), own_M, (qptr, count, flvl, fcur, ftotal, fwait, %rd11, %rd2, maxcount, tmpptr, statsptr);
+    setp.eq.u32 %p4, %r0, 0;
+    @%p4 bra GE_fail;
+    ld.global.u64 %rd12, [tmpptr];
+    add.u64 %rd13, %rd2, %rd12;
+    setp.lt.u64 %p5, %rd13, %rd2;
+    @%p5 bra GE_fail;
+    mov.u64 %rd2, %rd13;
+    ld.global.u64 %rd14, [statsptr+24];
+    add.u64 %rd14, %rd14, 1;
+    st.global.u64 [statsptr+24], %rd14;
+    bra GE_hitloop;
+
+GE_after_hit:
+    div.u64 %rd15, %rd2, %rd8;
+    setp.gt.u64 %p6, %rd8, %rd15;
+    @%p6 bra GE_success;
+    add.u64 %rd4, %rd4, 1;
+    bra GE_outer;
+
+GE_success:
+    sub.u64 %rd16, %rd2, pval;
+    st.global.u64 [outptr], %rd16;
+    mov.u32 rv, 1;
+    ret;
+GE_quick:
+    st.global.u64 [outptr], %rd1;
+    mov.u32 rv, 1;
+    ret;
+GE_fail:
+    mov.u32 rv, 0;
+    ret;
+}
+
+.func (.reg .u32 rv) ensure_dimension(
+    .reg .u64 index, .reg .u64 qptr, .reg .u64 countptr,
+    .reg .u64 flvl, .reg .u64 fcur, .reg .u64 ftotal, .reg .u64 fwait,
+    .reg .u64 maxcount, .reg .u64 gaptemp, .reg .u64 mtemp, .reg .u64 statsptr)
+{
+    .reg .pred %p<12>;
+    .reg .u32 %r<8>;
+    .reg .u64 %rd<24>;
+ED_loop:
+    ld.global.u64 %rd0, [countptr];
+    setp.gt.u64 %p0, %rd0, index;
+    @%p0 bra ED_done;
+    setp.ge.u64 %p1, %rd0, maxcount;
+    @%p1 bra ED_fail;
+    sub.u64 %rd1, %rd0, 1;
+    shl.b64 %rd2, %rd1, 3;
+    add.u64 %rd3, qptr, %rd2;
+    ld.global.u64 %rd4, [%rd3]; // last
+    call.uni (%r0), gap_existing, (%rd4, qptr, %rd0, flvl, fcur, ftotal, fwait, maxcount, gaptemp, mtemp, statsptr);
+    setp.eq.u32 %p2, %r0, 0;
+    @%p2 bra ED_fail;
+    ld.global.u64 %rd5, [gaptemp];
+    add.u64 %rd6, %rd4, %rd5;
+    setp.lt.u64 %p3, %rd6, %rd4;
+    @%p3 bra ED_fail;
+    shl.b64 %rd7, %rd0, 3;
+    add.u64 %rd8, qptr, %rd7;
+    st.global.u64 [%rd8], %rd6;
+    add.u64 %rd0, %rd0, 1;
+    st.global.u64 [countptr], %rd0;
+    ld.global.u64 %rd9, [statsptr+16];
+    add.u64 %rd9, %rd9, 1;
+    st.global.u64 [statsptr+16], %rd9;
+    ld.global.u64 %rd10, [statsptr+8];
+    setp.gt.u64 %p4, %rd0, %rd10;
+    @!%p4 bra ED_loop;
+    st.global.u64 [statsptr+8], %rd0;
+    bra ED_loop;
+ED_done:
+    mov.u32 rv, 1;
+    ret;
+ED_fail:
+    mov.u32 rv, 0;
+    ret;
+}
+
+
+// Cooperative high-dimensional next-gap evaluator.
+// A single 256-thread CTA is persistent for one successor step.  Prime dimensions
+// are projected in parallel in tiles of blockDim.x; atomicMin selects the first
+// active dimension.  Only the nested M jump for that selected dimension is causal.
+.func (.reg .u32 rv) hd_next_gap_block(
+    .reg .u64 pval, .reg .u64 qptr, .reg .u64 countptr,
+    .reg .u64 flvl, .reg .u64 fcur, .reg .u64 ftotal, .reg .u64 fwait,
+    .reg .u64 maxcount, .reg .u64 gaptemp, .reg .u64 mtemp,
+    .reg .u64 candidateptr, .reg .u64 hitptr, .reg .u64 outgap, .reg .u64 statsptr)
+{
+    .reg .pred %p<24>;
+    .reg .u32 %r<16>;
+    .reg .u64 %rd<48>;
+
+    mov.u32 %r0, %tid.x;
+    mov.u32 %r1, %ntid.x;
+    setp.lt.u64 %p0, pval, 2;
+    @%p0 bra HD_uniform_fail;
+
+    // Thread 0 obtains the first q0-survivor through the same recurrence.
+    // q0=2 is a normal implicit dimension, not an odd-only fast path.
+    setp.ne.u32 %p1, %r0, 0;
+    @%p1 bra HD_init_wait;
+    ld.global.u64 %rd0, [countptr];
+    mov.u64 %rd1, 0;
+    call.uni (%r2), own_M, (qptr, %rd0, flvl, fcur, ftotal, fwait, %rd1, pval, maxcount, mtemp, statsptr);
+    setp.eq.u32 %p2, %r2, 0;
+    @%p2 bra HD_init_fail;
+    ld.global.u64 %rd1, [mtemp];
+    add.u64 %rd2, pval, %rd1;
+    setp.lt.u64 %p2, %rd2, pval;
+    @%p2 bra HD_init_fail;
+    st.global.u64 [candidateptr], %rd2;
+    st.global.u64 [outgap], 0;
+    st.global.u32 [hitptr], 0;
+    bra HD_init_wait;
+HD_init_fail:
+    mov.u32 %r2, 0xfffffffd;
+    st.global.u32 [hitptr], %r2;
+HD_init_wait:
+    bar.sync 0;
+    ld.global.u32 %r3, [hitptr];
+    setp.eq.u32 %p3, %r3, 0xfffffffd;
+    @%p3 bra HD_uniform_fail;
+
+HD_round:
+    // Thread 0 grows the internally generated dimension chain only as far as
+    // exact certification requires: last_q^2 > candidate.
+    setp.ne.u32 %p4, %r0, 0;
+    @%p4 bra HD_ensure_wait;
+HD_ensure_loop:
+    ld.global.u64 %rd3, [candidateptr];
+    ld.global.u64 %rd4, [countptr];
+    setp.eq.u64 %p5, %rd4, 0;
+    @%p5 bra HD_ensure_fail;
+    sub.u64 %rd5, %rd4, 1;
+    shl.b64 %rd6, %rd5, 3;
+    add.u64 %rd7, qptr, %rd6;
+    ld.global.u64 %rd8, [%rd7];
+    div.u64 %rd9, %rd3, %rd8;
+    setp.gt.u64 %p6, %rd8, %rd9;
+    @%p6 bra HD_ensure_ready;
+    // index=count appends exactly one new self-generated dimension.
+    call.uni (%r4), ensure_dimension, (%rd4, qptr, countptr,
+        flvl, fcur, ftotal, fwait, maxcount, gaptemp, mtemp, statsptr);
+    setp.eq.u32 %p7, %r4, 0;
+    @%p7 bra HD_ensure_fail;
+    bra HD_ensure_loop;
+HD_ensure_ready:
+    ld.global.u64 %rd10, [countptr];
+    st.global.u64 [statsptr+8], %rd10;
+    bra HD_ensure_wait;
+HD_ensure_fail:
+    mov.u32 %r5, 0xfffffffd;
+    st.global.u32 [hitptr], %r5;
+HD_ensure_wait:
+    bar.sync 0;
+    ld.global.u32 %r6, [hitptr];
+    setp.eq.u32 %p8, %r6, 0xfffffffd;
+    @%p8 bra HD_uniform_fail;
+
+    // New projection round.  Each CUDA lane owns a strided subset of q-dimensions.
+    setp.ne.u32 %p9, %r0, 0;
+    @%p9 bra HD_hit_init_wait;
+    mov.u32 %r7, 0xffffffff;
+    st.global.u32 [hitptr], %r7;
+    ld.global.u64 %rd11, [statsptr+0];
+    add.u64 %rd11, %rd11, 1;
+    st.global.u64 [statsptr+0], %rd11;
+HD_hit_init_wait:
+    bar.sync 0;
+
+    ld.global.u64 %rd12, [candidateptr];
+    ld.global.u64 %rd13, [countptr];
+    cvt.u64.u32 %rd14, %r0;
+    add.u64 %rd14, %rd14, 1;       // q[0]=2 is already satisfied
+    cvt.u64.u32 %rd15, %r1;        // lane stride
+    mov.u64 %rd16, 0;              // local divisibility-test count
+HD_scan_loop:
+    setp.ge.u64 %p10, %rd14, %rd13;
+    @%p10 bra HD_scan_done;
+    shl.b64 %rd17, %rd14, 3;
+    add.u64 %rd18, qptr, %rd17;
+    ld.global.u64 %rd19, [%rd18];
+    div.u64 %rd20, %rd12, %rd19;
+    // q > candidate/q means q^2 > candidate. q is ascending, so this lane is done.
+    setp.gt.u64 %p11, %rd19, %rd20;
+    @%p11 bra HD_scan_done;
+    add.u64 %rd16, %rd16, 1;
+    rem.u64 %rd21, %rd12, %rd19;
+    setp.ne.u64 %p12, %rd21, 0;
+    @%p12 bra HD_scan_next;
+    cvt.u32.u64 %r8, %rd14;
+    atom.global.min.u32 %r9, [hitptr], %r8;
+HD_scan_next:
+    add.u64 %rd14, %rd14, %rd15;
+    bra HD_scan_loop;
+HD_scan_done:
+    setp.eq.u64 %p13, %rd16, 0;
+    @%p13 bra HD_scan_count_done;
+    add.u64 %rd22, statsptr, 32;
+    atom.global.add.u64 %rd23, [%rd22], %rd16;
+HD_scan_count_done:
+    bar.sync 0;
+
+    // Thread 0 resolves the projection. No active dimension means the current
+    // survivor is exact. Otherwise jump only through the selected lower-level
+    // survivor map and project all dimensions again.
+    setp.ne.u32 %p14, %r0, 0;
+    @%p14 bra HD_resolve_wait;
+    ld.global.u32 %r10, [hitptr];
+    setp.eq.u32 %p15, %r10, 0xffffffff;
+    @%p15 bra HD_success;
+    cvt.u64.u32 %rd24, %r10;
+    setp.eq.u64 %p16, %rd24, 0;
+    @%p16 bra HD_resolve_fail;
+    sub.u64 %rd25, %rd24, 1;
+    ld.global.u64 %rd26, [candidateptr];
+    ld.global.u64 %rd27, [countptr];
+    call.uni (%r11), own_M, (qptr, %rd27, flvl, fcur, ftotal, fwait,
+        %rd25, %rd26, maxcount, mtemp, statsptr);
+    setp.eq.u32 %p17, %r11, 0;
+    @%p17 bra HD_resolve_fail;
+    ld.global.u64 %rd28, [mtemp];
+    add.u64 %rd29, %rd26, %rd28;
+    setp.lt.u64 %p18, %rd29, %rd26;
+    @%p18 bra HD_resolve_fail;
+    st.global.u64 [candidateptr], %rd29;
+    ld.global.u64 %rd30, [statsptr+24];
+    add.u64 %rd30, %rd30, 1;
+    st.global.u64 [statsptr+24], %rd30;
+    bra HD_resolve_wait;
+HD_success:
+    ld.global.u64 %rd31, [candidateptr];
+    sub.u64 %rd32, %rd31, pval;
+    st.global.u64 [outgap], %rd32;
+    mov.u32 %r12, 0xfffffffe;
+    st.global.u32 [hitptr], %r12;
+    bra HD_resolve_wait;
+HD_resolve_fail:
+    mov.u32 %r13, 0xfffffffd;
+    st.global.u32 [hitptr], %r13;
+HD_resolve_wait:
+    bar.sync 0;
+    ld.global.u32 %r14, [hitptr];
+    setp.eq.u32 %p19, %r14, 0xfffffffe;
+    @%p19 bra HD_uniform_success;
+    setp.eq.u32 %p20, %r14, 0xfffffffd;
+    @%p20 bra HD_uniform_fail;
+    bra HD_round;
+
+HD_uniform_success:
+    mov.u32 rv, 1;
+    ret;
+HD_uniform_fail:
+    mov.u32 rv, 0;
+    ret;
+}
+
+// Normal solve / self-bootstrap entry. Exactly one CTA is used; all 256 lanes
+// participate in each prime-dimension projection.  The prime-to-prime chain is
+// causal, but each successor step is high-dimensional across q.
+.visible .entry zero_candidate_prime_hd(
+    .param .u32 mode_p,
+    .param .u64 value_p,
+    .param .u64 qptr_p,
+    .param .u64 countptr_p,
+    .param .u64 flvl_p,
+    .param .u64 fcur_p,
+    .param .u64 ftotal_p,
+    .param .u64 fwait_p,
+    .param .u64 maxcount_p,
+    .param .u64 out_p,
+    .param .u64 statsptr_p,
+    .param .u64 gaptemp_p,
+    .param .u64 mtemp_p,
+    .param .u64 candidate_p,
+    .param .u64 hit_p)
+{
+    .reg .pred %p<16>;
+    .reg .u32 %r<8>;
+    .reg .u64 %rd<32>;
+
+    ld.param.u32 %r0, [mode_p];
+    ld.param.u64 %rd0, [value_p];
+    ld.param.u64 %rd1, [qptr_p];
+    ld.param.u64 %rd2, [countptr_p];
+    ld.param.u64 %rd3, [flvl_p];
+    ld.param.u64 %rd4, [fcur_p];
+    ld.param.u64 %rd5, [ftotal_p];
+    ld.param.u64 %rd6, [fwait_p];
+    ld.param.u64 %rd7, [maxcount_p];
+    ld.param.u64 %rd8, [out_p];
+    ld.param.u64 %rd9, [statsptr_p];
+    ld.param.u64 %rd10, [gaptemp_p];
+    ld.param.u64 %rd11, [mtemp_p];
+    ld.param.u64 %rd12, [candidate_p];
+    ld.param.u64 %rd13, [hit_p];
+    mov.u32 %r1, %tid.x;
+
+    // Reset the internal dimension state. No external prime table participates.
+    setp.ne.u32 %p0, %r1, 0;
+    @%p0 bra ZC_reset_wait;
+    st.global.u64 [%rd1], 2;
+    st.global.u64 [%rd2], 1;
+    st.global.u64 [%rd8+0], 0;
+    st.global.u64 [%rd8+8], 0;
+    st.global.u64 [%rd8+16], 0;
+    st.global.u64 [%rd8+24], 0;
+    st.global.u64 [%rd9+0], 0;
+    st.global.u64 [%rd9+8], 1;
+    st.global.u64 [%rd9+16], 0;
+    st.global.u64 [%rd9+24], 0;
+    st.global.u64 [%rd9+32], 0;
+ZC_reset_wait:
+    bar.sync 0;
+
+    setp.eq.u32 %p1, %r0, 1;
+    @%p1 bra ZC_self;
+    setp.eq.u32 %p2, %r0, 2;
+    @%p2 bra ZC_self;
+    setp.lt.u64 %p3, %rd0, 2;
+    @%p3 bra ZC_bad;
+    mov.u64 %rd14, %rd0;
+    bra ZC_target;
+
+ZC_self:
+    setp.lt.u64 %p4, %rd0, 1;
+    @%p4 bra ZC_bad;
+    mov.u64 %rd14, 2;
+    mov.u64 %rd15, 1;
+ZC_self_loop:
+    setp.ge.u64 %p5, %rd15, %rd0;
+    @%p5 bra ZC_self_done;
+    // Fully implicit Self Bootstrap contract: no prime-dimension basis survives
+    // from one successor to the next. Re-enter each step from q0=2 and grow
+    // only the live dimensions demanded by hd_next_gap_block.
+    setp.ne.u32 %p15, %r1, 0;
+    @%p15 bra ZC_self_reset_wait;
+    st.global.u64 [%rd1], 2;
+    st.global.u64 [%rd2], 1;
+ZC_self_reset_wait:
+    bar.sync 0;
+    add.u64 %rd16, %rd8, 16;
+    call.uni (%r2), hd_next_gap_block, (%rd14, %rd1, %rd2, %rd3, %rd4, %rd5, %rd6,
+        %rd7, %rd10, %rd11, %rd12, %rd13, %rd16, %rd9);
+    setp.eq.u32 %p6, %r2, 0;
+    @%p6 bra ZC_fail;
+    ld.global.u64 %rd14, [%rd12];
+    add.u64 %rd15, %rd15, 1;
+    setp.eq.u64 %p7, %rd15, 0;
+    @%p7 bra ZC_fail;
+    bra ZC_self_loop;
+ZC_self_done:
+    setp.eq.u32 %p8, %r0, 2;
+    @%p8 bra ZC_return_self;
+    // For mode 1, target-gap statistics start here while preserving generated q.
+    setp.ne.u32 %p9, %r1, 0;
+    @%p9 bra ZC_stats_wait;
+    st.global.u64 [%rd9+0], 0;
+    ld.global.u64 %rd17, [%rd2];
+    st.global.u64 [%rd9+8], %rd17;
+    st.global.u64 [%rd9+16], 0;
+    st.global.u64 [%rd9+24], 0;
+    st.global.u64 [%rd9+32], 0;
+ZC_stats_wait:
+    bar.sync 0;
+    bra ZC_target;
+
+ZC_return_self:
+    setp.ne.u32 %p10, %r1, 0;
+    @%p10 ret;
+    st.global.u64 [%rd8+8], %rd14;
+    st.global.u64 [%rd8+16], 0;
+    st.global.u64 [%rd8+24], %rd14;
+    st.global.u64 [%rd8+0], 1;
+    ret;
+
+ZC_target:
+    add.u64 %rd18, %rd8, 16;
+    call.uni (%r3), hd_next_gap_block, (%rd14, %rd1, %rd2, %rd3, %rd4, %rd5, %rd6,
+        %rd7, %rd10, %rd11, %rd12, %rd13, %rd18, %rd9);
+    setp.eq.u32 %p11, %r3, 0;
+    @%p11 bra ZC_fail;
+    setp.ne.u32 %p12, %r1, 0;
+    @%p12 ret;
+    st.global.u64 [%rd8+8], %rd14;
+    ld.global.u64 %rd19, [%rd12];
+    st.global.u64 [%rd8+24], %rd19;
+    st.global.u64 [%rd8+0], 1;
+    ret;
+
+ZC_bad:
+    setp.ne.u32 %p13, %r1, 0;
+    @%p13 ret;
+    st.global.u64 [%rd8+0], 2;
+    ret;
+ZC_fail:
+    setp.ne.u32 %p14, %r1, 0;
+    @%p14 ret;
+    st.global.u64 [%rd8+0], 3;
+    ret;
+}
+
+// Bounded experimental chain. q/count survive between host launches. Each
+// successor step uses the same 256-lane high-dimensional projection.
+.visible .entry zero_candidate_prime_explore_hd(
+    .param .u64 current_p_p,
+    .param .u64 current_rank_p,
+    .param .u64 steps_p,
+    .param .u64 qptr_p,
+    .param .u64 countptr_p,
+    .param .u64 flvl_p,
+    .param .u64 fcur_p,
+    .param .u64 ftotal_p,
+    .param .u64 fwait_p,
+    .param .u64 maxcount_p,
+    .param .u64 out_p,
+    .param .u64 statsptr_p,
+    .param .u64 gaptemp_p,
+    .param .u64 mtemp_p,
+    .param .u64 candidate_p,
+    .param .u64 hit_p)
+{
+    .reg .pred %p<12>;
+    .reg .u32 %r<6>;
+    .reg .u64 %rd<32>;
+    ld.param.u64 %rd0, [current_p_p];
+    ld.param.u64 %rd1, [current_rank_p];
+    ld.param.u64 %rd2, [steps_p];
+    ld.param.u64 %rd3, [qptr_p];
+    ld.param.u64 %rd4, [countptr_p];
+    ld.param.u64 %rd5, [flvl_p];
+    ld.param.u64 %rd6, [fcur_p];
+    ld.param.u64 %rd7, [ftotal_p];
+    ld.param.u64 %rd8, [fwait_p];
+    ld.param.u64 %rd9, [maxcount_p];
+    ld.param.u64 %rd10, [out_p];
+    ld.param.u64 %rd11, [statsptr_p];
+    ld.param.u64 %rd12, [gaptemp_p];
+    ld.param.u64 %rd13, [mtemp_p];
+    ld.param.u64 %rd14, [candidate_p];
+    ld.param.u64 %rd15, [hit_p];
+    mov.u32 %r0, %tid.x;
+
+    setp.ne.u32 %p0, %r0, 0;
+    @%p0 bra ZEX_init_wait;
+    st.global.u64 [%rd10+0], 0;
+    st.global.u64 [%rd10+8], %rd0;
+    st.global.u64 [%rd10+16], %rd1;
+    st.global.u64 [%rd10+24], 0;
+    st.global.u64 [%rd10+32], 0;
+ZEX_init_wait:
+    bar.sync 0;
+    mov.u64 %rd16, 0;
+    mov.u64 %rd17, 0;
+ZEX_loop:
+    setp.ge.u64 %p1, %rd16, %rd2;
+    @%p1 bra ZEX_success;
+    add.u64 %rd18, %rd10, 24;
+    call.uni (%r1), hd_next_gap_block, (%rd0, %rd3, %rd4, %rd5, %rd6, %rd7, %rd8,
+        %rd9, %rd12, %rd13, %rd14, %rd15, %rd18, %rd11);
+    setp.eq.u32 %p2, %r1, 0;
+    @%p2 bra ZEX_limit;
+    ld.global.u64 %rd17, [%rd18];
+    ld.global.u64 %rd0, [%rd14];
+    add.u64 %rd1, %rd1, 1;
+    setp.eq.u64 %p3, %rd1, 0;
+    @%p3 bra ZEX_limit;
+    add.u64 %rd16, %rd16, 1;
+    bra ZEX_loop;
+ZEX_success:
+    setp.ne.u32 %p4, %r0, 0;
+    @%p4 ret;
+    st.global.u64 [%rd10+0], 1;
+    st.global.u64 [%rd10+8], %rd0;
+    st.global.u64 [%rd10+16], %rd1;
+    st.global.u64 [%rd10+24], %rd17;
+    st.global.u64 [%rd10+32], %rd16;
+    ret;
+ZEX_limit:
+    setp.ne.u32 %p5, %r0, 0;
+    @%p5 ret;
+    st.global.u64 [%rd10+0], 3;
+    st.global.u64 [%rd10+8], %rd0;
+    st.global.u64 [%rd10+16], %rd1;
+    st.global.u64 [%rd10+24], %rd17;
+    st.global.u64 [%rd10+32], %rd16;
+    ret;
+}
+
+
+// ---------------------------------------------------------------------------
+// 128-bit record-seeded implicit-dimension GPU path.
+// No persistent prime basis is accepted as input. q[0..depth-1] below is only
+// a fixed-size live recursion workspace rebuilt from q0=2 for each successor.
+// All 256 lanes project the current 128-bit survivor across the live dimensions.
+// ---------------------------------------------------------------------------
+
+.func (.reg .u64 rv) ir_u128_mod(
+    .reg .u64 hi, .reg .u64 lo, .reg .u64 q)
+{
+    .reg .pred %p<8>;
+    .reg .u32 %r<4>;
+    .reg .u64 %rd<12>;
+    setp.eq.u64 %p0, q, 0;
+    @%p0 bra IRM_ZERO;
+    rem.u64 %rd0, hi, q;
+    mov.u32 %r0, 0;
+IRM_LOOP:
+    setp.ge.u32 %p1, %r0, 64;
+    @%p1 bra IRM_DONE;
+    and.b64 %rd1, lo, 0x8000000000000000;
+    setp.ne.u64 %p2, %rd1, 0;
+    selp.u64 %rd2, 1, 0, %p2;
+    shl.b64 lo, lo, 1;
+    sub.u64 %rd3, q, %rd0;
+    setp.ge.u64 %p3, %rd0, %rd3;
+    @%p3 bra IRM_SUBPATH;
+    add.u64 %rd0, %rd0, %rd0;
+    add.u64 %rd0, %rd0, %rd2;
+    bra IRM_NORM;
+IRM_SUBPATH:
+    sub.u64 %rd0, %rd0, %rd3;
+    add.u64 %rd0, %rd0, %rd2;
+IRM_NORM:
+    setp.ge.u64 %p4, %rd0, q;
+    @%p4 sub.u64 %rd0, %rd0, q;
+    add.u32 %r0, %r0, 1;
+    bra IRM_LOOP;
+IRM_DONE:
+    mov.u64 rv, %rd0;
+    ret;
+IRM_ZERO:
+    mov.u64 rv, 0;
+    ret;
+}
+
+.func (.reg .u32 rv) ir_M128(
+    .reg .u64 qptr, .reg .u64 count,
+    .reg .u64 flvl, .reg .u64 flo, .reg .u64 fhi,
+    .reg .u64 ftotal, .reg .u64 fwait,
+    .reg .u64 level, .reg .u64 xlo, .reg .u64 xhi,
+    .reg .u64 maxcount, .reg .u64 outptr, .reg .u64 statsptr)
+{
+    .reg .pred %p<20>;
+    .reg .u32 %r<8>;
+    .reg .u64 %rd<40>;
+    setp.ge.u64 %p0, level, count;
+    @%p0 bra IR128_FAIL;
+    setp.ge.u64 %p1, level, maxcount;
+    @%p1 bra IR128_FAIL;
+    mov.u64 %rd0, 1; // depth
+    mov.u64 %rd1, 0; // return distance
+    st.global.u64 [flvl], level;
+    st.global.u64 [flo], xlo;
+    st.global.u64 [fhi], xhi;
+    st.global.u64 [ftotal], 0;
+    st.global.u64 [fwait], 0;
+IR128_LOOP:
+    setp.eq.u64 %p2, %rd0, 0;
+    @%p2 bra IR128_DONE;
+    sub.u64 %rd2, %rd0, 1;
+    shl.b64 %rd3, %rd2, 3;
+    add.u64 %rd4, flvl, %rd3;
+    add.u64 %rd5, flo, %rd3;
+    add.u64 %rd6, fhi, %rd3;
+    add.u64 %rd7, ftotal, %rd3;
+    add.u64 %rd8, fwait, %rd3;
+    ld.global.u64 %rd9, [%rd4];
+    setp.eq.u64 %p3, %rd9, 0;
+    @%p3 bra IR128_BASE;
+    ld.global.u64 %rd10, [%rd8];
+    setp.eq.u64 %p4, %rd10, 0;
+    @%p4 bra IR128_DESCEND;
+    ld.global.u64 %rd11, [%rd7];
+    add.u64 %rd12, %rd11, %rd1;
+    setp.lt.u64 %p5, %rd12, %rd11;
+    @%p5 bra IR128_FAIL;
+    ld.global.u64 %rd13, [%rd5];
+    ld.global.u64 %rd14, [%rd6];
+    add.cc.u64 %rd15, %rd13, %rd1;
+    addc.u64 %rd16, %rd14, 0;
+    setp.lt.u64 %p6, %rd16, %rd14;
+    @%p6 bra IR128_FAIL;
+    st.global.u64 [%rd7], %rd12;
+    st.global.u64 [%rd5], %rd15;
+    st.global.u64 [%rd6], %rd16;
+    ld.global.u64 %rd17, [statsptr+24];add.u64 %rd17,%rd17,1;st.global.u64 [statsptr+24],%rd17;
+    ld.global.u64 %rd18, [statsptr+32];add.u64 %rd18,%rd18,1;st.global.u64 [statsptr+32],%rd18;
+    shl.b64 %rd19, %rd9, 3;add.u64 %rd20, qptr, %rd19;ld.global.u64 %rd21, [%rd20];
+    call.uni (%rd22), ir_u128_mod, (%rd16, %rd15, %rd21);
+    setp.ne.u64 %p7, %rd22, 0;
+    @%p7 bra IR128_RETURN;
+    st.global.u64 [%rd8], 0;
+    bra IR128_LOOP;
+IR128_RETURN:
+    mov.u64 %rd1, %rd12;
+    sub.u64 %rd0, %rd0, 1;
+    bra IR128_LOOP;
+IR128_DESCEND:
+    st.global.u64 [%rd8], 1;
+    setp.ge.u64 %p8, %rd0, maxcount;
+    @%p8 bra IR128_FAIL;
+    shl.b64 %rd23, %rd0, 3;
+    add.u64 %rd24, flvl, %rd23;add.u64 %rd25, flo, %rd23;add.u64 %rd26, fhi, %rd23;
+    add.u64 %rd27, ftotal, %rd23;add.u64 %rd28, fwait, %rd23;
+    sub.u64 %rd29, %rd9, 1;
+    st.global.u64 [%rd24], %rd29;
+    ld.global.u64 %rd30, [%rd5];ld.global.u64 %rd31, [%rd6];
+    st.global.u64 [%rd25], %rd30;st.global.u64 [%rd26], %rd31;
+    st.global.u64 [%rd27], 0;st.global.u64 [%rd28], 0;
+    add.u64 %rd0, %rd0, 1;
+    bra IR128_LOOP;
+IR128_BASE:
+    // Uniform q0 survivor rule for 128-bit state. No parity/odd shortcut.
+    ld.global.u64 %rd32, [%rd5];
+    ld.global.u64 %rd33, [%rd6];
+    ld.global.u64 %rd35, [qptr];
+    mov.u64 %rd34, 0;
+IR128_BASE_LOOP:
+    mov.u64 %rd37, %rd33;
+    add.cc.u64 %rd32, %rd32, 1;
+    addc.u64 %rd33, %rd33, 0;
+    setp.lt.u64 %p9, %rd33, %rd37;
+    @%p9 bra IR128_FAIL;
+    add.u64 %rd34, %rd34, 1;
+    ld.global.u64 %rd38,[statsptr+32];add.u64 %rd38,%rd38,1;st.global.u64 [statsptr+32],%rd38;
+    call.uni (%rd36), ir_u128_mod, (%rd33, %rd32, %rd35);
+    setp.ne.u64 %p10, %rd36, 0;
+    @%p10 bra IR128_BASE_DONE;
+    ld.global.u64 %rd38,[statsptr+24];add.u64 %rd38,%rd38,1;st.global.u64 [statsptr+24],%rd38;
+    bra IR128_BASE_LOOP;
+IR128_BASE_DONE:
+    mov.u64 %rd1, %rd34;
+    sub.u64 %rd0, %rd0, 1;
+    bra IR128_LOOP;
+IR128_DONE:
+    st.global.u64 [outptr], %rd1;
+    mov.u32 rv, 1;
+    ret;
+IR128_FAIL:
+    mov.u32 rv, 0;
+    ret;
+}
+
+.visible .entry zero_candidate_prime_record_implicit(
+    .param .u64 rank_lo_p,
+    .param .u64 rank_hi_p,
+    .param .u64 p_lo_p,
+    .param .u64 p_hi_p,
+    .param .u64 steps_p,
+    .param .u64 depth_p,
+    .param .u64 qptr_p,
+    .param .u64 countptr_p,
+    .param .u64 flvl_p,
+    .param .u64 fcur_p,
+    .param .u64 ftotal_p,
+    .param .u64 fwait_p,
+    .param .u64 wflvl_p,
+    .param .u64 wlo_p,
+    .param .u64 whi_p,
+    .param .u64 wtotal_p,
+    .param .u64 wwait_p,
+    .param .u64 out_p,
+    .param .u64 statsptr_p,
+    .param .u64 gaptemp_p,
+    .param .u64 mtemp_p,
+    .param .u64 candlo_p,
+    .param .u64 candhi_p,
+    .param .u64 hit_p,
+    .param .u64 minlevel_p)
+{
+    .reg .pred %p<32>;
+    .reg .u32 %r<24>;
+    .reg .u64 %rd<64>;
+    ld.param.u64 %rd0,[rank_lo_p];ld.param.u64 %rd1,[rank_hi_p];
+    ld.param.u64 %rd2,[p_lo_p];ld.param.u64 %rd3,[p_hi_p];
+    ld.param.u64 %rd4,[steps_p];ld.param.u64 %rd5,[depth_p];
+    ld.param.u64 %rd6,[qptr_p];ld.param.u64 %rd7,[countptr_p];
+    ld.param.u64 %rd8,[flvl_p];ld.param.u64 %rd9,[fcur_p];ld.param.u64 %rd10,[ftotal_p];ld.param.u64 %rd11,[fwait_p];
+    ld.param.u64 %rd12,[wflvl_p];ld.param.u64 %rd13,[wlo_p];ld.param.u64 %rd14,[whi_p];ld.param.u64 %rd15,[wtotal_p];ld.param.u64 %rd16,[wwait_p];
+    ld.param.u64 %rd17,[out_p];ld.param.u64 %rd18,[statsptr_p];ld.param.u64 %rd19,[gaptemp_p];ld.param.u64 %rd20,[mtemp_p];
+    ld.param.u64 %rd21,[candlo_p];ld.param.u64 %rd22,[candhi_p];ld.param.u64 %rd23,[hit_p];ld.param.u64 %rd24,[minlevel_p];
+    mov.u32 %r0,%tid.x;
+    setp.lt.u64 %p0,%rd5,4;@%p0 bra RIR_BAD;
+    setp.gt.u64 %p1,%rd5,256;@%p1 bra RIR_BAD;
+    setp.ne.u32 %p2,%r0,0;@%p2 bra RIR_INIT_WAIT;
+    st.global.u64 [%rd17+0],0;st.global.u64 [%rd17+8],%rd0;st.global.u64 [%rd17+16],%rd1;
+    st.global.u64 [%rd17+24],%rd2;st.global.u64 [%rd17+32],%rd3;st.global.u64 [%rd17+40],0;st.global.u64 [%rd17+48],0;st.global.u64 [%rd17+56],0;
+    st.global.u64 [%rd18+0],0;st.global.u64 [%rd18+8],0;st.global.u64 [%rd18+16],0;st.global.u64 [%rd18+24],0;st.global.u64 [%rd18+32],0;
+    st.global.u32 [%rd23],0;
+RIR_INIT_WAIT:
+    bar.sync 0;
+    mov.u64 %rd25,0; // completed steps
+RIR_STEP_LOOP:
+    setp.ge.u64 %p3,%rd25,%rd4;@%p3 bra RIR_SUCCESS;
+    // Rebuild the live implicit dimension workspace for this successor only.
+    setp.ne.u32 %p4,%r0,0;@%p4 bra RIR_DIM_WAIT;
+    st.global.u64 [%rd6],2;st.global.u64 [%rd7],1;st.global.u32 [%rd23],0;
+    mov.u64 %rd26,1;
+RIR_DIM_LOOP:
+    setp.ge.u64 %p5,%rd26,%rd5;@%p5 bra RIR_DIM_DONE;
+    call.uni (%r1), ensure_dimension, (%rd26,%rd6,%rd7,%rd8,%rd9,%rd10,%rd11,%rd5,%rd19,%rd20,%rd18);
+    setp.eq.u32 %p6,%r1,0;@%p6 bra RIR_DIM_FAIL;
+    add.u64 %rd26,%rd26,1;bra RIR_DIM_LOOP;
+RIR_DIM_DONE:
+    ld.global.u64 %rd27,[%rd18+8];setp.ge.u64 %p7,%rd27,%rd5;@%p7 bra RIR_DIM_PEAK_OK;st.global.u64 [%rd18+8],%rd5;
+RIR_DIM_PEAK_OK:
+    // candidate = p + M_0(p), with q0=2 evaluated by the normal implicit rule.
+    ld.global.u64 %rd27,[%rd7];
+    mov.u64 %rd28,0;
+    call.uni (%r12), ir_M128, (%rd6,%rd27,%rd12,%rd13,%rd14,%rd15,%rd16,%rd28,%rd2,%rd3,%rd5,%rd20,%rd18);
+    setp.eq.u32 %p8,%r12,0;@%p8 bra RIR_DIM_FAIL;
+    ld.global.u64 %rd28,[%rd20];
+    add.cc.u64 %rd29,%rd2,%rd28;addc.u64 %rd30,%rd3,0;
+    setp.lt.u64 %p8,%rd30,%rd3;@%p8 bra RIR_DIM_FAIL;
+    st.global.u64 [%rd21],%rd29;st.global.u64 [%rd22],%rd30;st.global.u64 [%rd24],1;
+    bra RIR_DIM_WAIT;
+RIR_DIM_FAIL:
+    mov.u32 %r2,0xfffffffd;st.global.u32 [%rd23],%r2;
+RIR_DIM_WAIT:
+    bar.sync 0;
+    ld.global.u32 %r3,[%rd23];setp.eq.u32 %p9,%r3,0xfffffffd;@%p9 bra RIR_LIMIT;
+
+RIR_PROJECT:
+    // All lanes test one live dimension each. No natural-number candidates are enumerated.
+    setp.ne.u32 %p10,%r0,0;@%p10 bra RIR_HIT_RESET_WAIT;
+    mov.u32 %r4,0xffffffff;st.global.u32 [%rd23],%r4;
+    ld.global.u64 %rd31,[%rd18+0];add.u64 %rd31,%rd31,1;st.global.u64 [%rd18+0],%rd31;
+RIR_HIT_RESET_WAIT:
+    bar.sync 0;
+    ld.global.u64 %rd32,[%rd24];cvt.u64.u32 %rd33,%r0;add.u64 %rd34,%rd32,%rd33;
+    setp.ge.u64 %p11,%rd34,%rd5;@%p11 bra RIR_SCAN_DONE;
+    shl.b64 %rd35,%rd34,3;add.u64 %rd36,%rd6,%rd35;ld.global.u64 %rd37,[%rd36];
+    ld.global.u64 %rd38,[%rd21];ld.global.u64 %rd39,[%rd22];
+    call.uni (%rd40), ir_u128_mod, (%rd39,%rd38,%rd37);
+    add.u64 %rd41,%rd18,32;atom.global.add.u64 %rd42,[%rd41],1;
+    setp.ne.u64 %p12,%rd40,0;@%p12 bra RIR_SCAN_DONE;
+    cvt.u32.u64 %r5,%rd34;atom.global.min.u32 %r6,[%rd23],%r5;
+RIR_SCAN_DONE:
+    bar.sync 0;
+    setp.ne.u32 %p13,%r0,0;@%p13 bra RIR_RESOLVE_WAIT;
+    ld.global.u32 %r7,[%rd23];setp.eq.u32 %p14,%r7,0xffffffff;@%p14 bra RIR_STEP_DONE;
+    cvt.u64.u32 %rd43,%r7;setp.eq.u64 %p15,%rd43,0;@%p15 bra RIR_RESOLVE_FAIL;
+    sub.u64 %rd44,%rd43,1;ld.global.u64 %rd45,[%rd21];ld.global.u64 %rd46,[%rd22];ld.global.u64 %rd47,[%rd7];
+    call.uni (%r8), ir_M128, (%rd6,%rd47,%rd12,%rd13,%rd14,%rd15,%rd16,%rd44,%rd45,%rd46,%rd5,%rd20,%rd18);
+    setp.eq.u32 %p16,%r8,0;@%p16 bra RIR_RESOLVE_FAIL;
+    ld.global.u64 %rd48,[%rd20];add.cc.u64 %rd49,%rd45,%rd48;addc.u64 %rd50,%rd46,0;
+    setp.lt.u64 %p17,%rd50,%rd46;@%p17 bra RIR_RESOLVE_FAIL;
+    st.global.u64 [%rd21],%rd49;st.global.u64 [%rd22],%rd50;st.global.u64 [%rd24],%rd43;
+    ld.global.u64 %rd51,[%rd18+24];add.u64 %rd51,%rd51,1;st.global.u64 [%rd18+24],%rd51;
+    bra RIR_RESOLVE_WAIT;
+RIR_RESOLVE_FAIL:
+    mov.u32 %r9,0xfffffffd;st.global.u32 [%rd23],%r9;
+    bra RIR_RESOLVE_WAIT;
+RIR_STEP_DONE:
+    // gap must fit u64 in the current experimental contract.
+    ld.global.u64 %rd52,[%rd21];ld.global.u64 %rd53,[%rd22];
+    sub.cc.u64 %rd54,%rd52,%rd2;subc.u64 %rd55,%rd53,%rd3;
+    setp.ne.u64 %p18,%rd55,0;@%p18 bra RIR_RESOLVE_FAIL;
+    st.global.u64 [%rd17+40],%rd54;
+    mov.u32 %r10,0xfffffffe;st.global.u32 [%rd23],%r10;
+RIR_RESOLVE_WAIT:
+    bar.sync 0;
+    ld.global.u32 %r11,[%rd23];setp.eq.u32 %p19,%r11,0xfffffffd;@%p19 bra RIR_LIMIT;
+    setp.eq.u32 %p20,%r11,0xfffffffe;@%p20 bra RIR_COMMIT;
+    bra RIR_PROJECT;
+
+RIR_COMMIT:
+    setp.ne.u32 %p21,%r0,0;@%p21 bra RIR_COMMIT_WAIT;
+    ld.global.u64 %rd56,[%rd21];ld.global.u64 %rd57,[%rd22];mov.u64 %rd2,%rd56;mov.u64 %rd3,%rd57;
+    add.cc.u64 %rd0,%rd0,1;addc.u64 %rd1,%rd1,0;
+RIR_COMMIT_WAIT:
+    bar.sync 0;
+    // Advance the batch loop counter on every lane so CTA control flow remains
+    // uniform. Only thread 0 owns the causal p/rank registers.
+    add.u64 %rd25,%rd25,1;
+    setp.ne.u32 %p25,%r0,0;@%p25 bra RIR_COMMIT_COUNT_WAIT;
+    st.global.u64 [%rd17+48],%rd25;
+RIR_COMMIT_COUNT_WAIT:
+    bar.sync 0;
+    bra RIR_STEP_LOOP;
+
+RIR_SUCCESS:
+    setp.ne.u32 %p22,%r0,0;@%p22 ret;
+    st.global.u64 [%rd17+0],1;st.global.u64 [%rd17+8],%rd0;st.global.u64 [%rd17+16],%rd1;
+    st.global.u64 [%rd17+24],%rd2;st.global.u64 [%rd17+32],%rd3;st.global.u64 [%rd17+48],%rd25;
+    ret;
+RIR_LIMIT:
+    setp.ne.u32 %p23,%r0,0;@%p23 ret;
+    st.global.u64 [%rd17+0],3;st.global.u64 [%rd17+8],%rd0;st.global.u64 [%rd17+16],%rd1;
+    st.global.u64 [%rd17+24],%rd2;st.global.u64 [%rd17+32],%rd3;st.global.u64 [%rd17+48],%rd25;
+    ret;
+RIR_BAD:
+    setp.ne.u32 %p24,%r0,0;@%p24 ret;
+    st.global.u64 [%rd17+0],3;ret;
+}
