@@ -1,0 +1,7 @@
+# gpu_kernel.ptx is the actual NVIDIA device program loaded through the CUDA
+# Driver API. GitHub Linguist does not associate .ptx with Cuda by extension,
+# so classify this device source explicitly instead of introducing a fake .cu wrapper.
+source/*.ptx linguist-language=Cuda linguist-detectable=true
+
+# Generated build product; normally ignored and not committed.
+source/gpu_kernel_ptx.h linguist-generated=true
