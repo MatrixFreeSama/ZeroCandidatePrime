@@ -50,6 +50,7 @@ The two implementations were required to return the same finite-width gap before
 | `10^1000 + 267` | 4 | 4 | 1.79 us | 17.92 us |
 | `10^10000 + 267` | 34 | 34 | 3.33 us | 296.28 us |
 | `10^100000 + 267` | 10 | 10 | 2.14 us | 1386.27 us |
+| `10^1000000 + 267` | 12 | 12 | 3.31 us | 36422.87 us |
 
 Repeated evaluation of the unchanged residue state produced approximately:
 
@@ -59,8 +60,9 @@ Repeated evaluation of the unchanged residue state produced approximately:
 | `10^1000` | 1.72 us |
 | `10^10000` | 2.76 us |
 | `10^100000` | 2.01 us |
+| `10^1000000` | 2.86 us |
 
-The gap itself changes the path length, so these values should not be interpreted as a proof of perfectly constant latency. The important observation is that increasing the large integer from roughly 333 bits to roughly 332,193 bits did not produce the growth seen when the arbitrary-precision integer remained inside every divisibility operation.
+The gap itself changes the path length, so these values should not be interpreted as a proof of perfectly constant latency. The important observation is that increasing the large integer from roughly 333 bits to roughly 3.32 million bits did not produce the growth seen when the arbitrary-precision integer remained inside every divisibility operation.
 
 ## Initialization cost
 
@@ -72,6 +74,7 @@ The large integer has not disappeared from the entire computation. Establishing 
 | `10^1000` | 19.39 us |
 | `10^10000` | 67.80 us |
 | `10^100000` | 629.58 us |
+| `10^1000000` | 5947.17 us |
 
 This cost is paid once for a chain-resident residue state. Subsequent state updates use
 
@@ -106,13 +109,17 @@ and `K=256`, the residue-state C module returned
 gap = 18
 ```
 
-matching the existing fixed-depth 128-bit survivor experiment for the same finite dimension width. This checks the intended algebraic equivalence of the two fixed-K representations; it does not make `18` the exact next-prime gap.
+matching the existing fixed-depth 128-bit survivor experiment for the same finite dimension width. The repository implementation was additionally rewritten to use an explicit work stack rather than C recursion and still returned `gap = 18`, `q_max = 1619` for this check.
+
+This checks the intended algebraic equivalence of the two fixed-K representations; it does not make `18` the exact next-prime gap.
 
 ## Interpretation
 
 The benchmark supports a narrow representation claim:
 
 > Once the residue field is available, the large integer can be removed from the inner fixed-width survivor divisibility loop.
+
+At `K=256`, the full-big-integer inner call grew from about 5.90 us near `10^100` to about 36.4 ms near `10^1000000`, while the residue-only inner call remained in the low-single-digit microsecond range for these tested states. Initialization still scales with bit width and explicit dimension width.
 
 It does not establish:
 
