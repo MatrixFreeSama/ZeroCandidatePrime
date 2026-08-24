@@ -78,17 +78,18 @@ The host side loads the NVIDIA Driver API dynamically from `nvcuda.dll`. The GPU
 ## Source layout
 
 ```text
-source/main.c                 Win32 UI, task routing, gates and result presentation
-source/own_solver.c           CPU implementation of the survivor recurrence
-source/vf_residue_state.c     verification-free finite-width residue experiment
-aource/gpu_solver.c           NVIDIA Driver API host implementation
-source/gpu_kernel.ptx         CUDA/PTX device implementation
-source/traditional.c          isolated bootstrap / validation routines
-source/winmini.h              minimal Win32 declarations
-source/build.sh               freestanding Windows x64 build
+source/main.c                    Win32 UI, task routing, gates and result presentation
+source/own_solver.c              CPU implementation of the survivor recurrence
+source/vf_residue_state.c        verification-free finite-width residue experiment
+source/gpu_solver.c              NVIDIA Driver API host implementation
+source/gpu_kernel.ptx            CUDA/PTX device implementation
+source/traditional.c             isolated bootstrap / validation routines
+source/winmini.h                 minimal Win32 declarations
+source/build.sh                  freestanding Windows x64 build
+experiments/vf1_residue_gmp.c    arbitrary-precision cloud benchmark mirror
 ```
 
-The build has no Python dependency. A small host-side C utility converts the checked-in PTX text into the C header embedded by `gpu_solver.c`.
+The build has no Python dependency. A small host-side C utility converts the checked-in PTX text into the C header embedded by `gpu_solver.c`. The GMP benchmark is isolated under `experiments/` and is not part of the Windows application build.
 
 ## Scope of the claim
 
