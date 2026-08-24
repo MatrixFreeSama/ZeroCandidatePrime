@@ -28,6 +28,13 @@ static int vf_add_u64(OwnU128 a, UINT64 b, OwnU128 *out) {
     *out=r;return 1;
 }
 
+static UINT64 vf_mod_add(UINT64 a, UINT64 b, UINT64 m) {
+    if(m==0)return 0;
+    a%=m;b%=m;
+    if(a>=m-b)return a-(m-b);
+    return a+b;
+}
+
 static UINT64 vf_u128_mod_u64(OwnU128 a, UINT64 q) {
     UINT64 r,i,bit;
     if(q==0)return 0;
@@ -80,7 +87,7 @@ static UINT64 vf_M_q(const UINT64 *q, UINT64 level, UINT64 x,
 static UINT64 vf_M_residue(const UINT64 *q,const UINT64 *r,UINT64 level,
                            UINT64 offset,volatile int *cancel,int *ok,
                            OwnSolveStats *stats) {
-    UINT64 total=0,d,m;
+    UINT64 total=0,d,m,child_offset;
     if(!ok||!*ok||!q||!r){if(ok)*ok=0;return 0;}
     if(cancel&&*cancel){*ok=0;return 0;}
     if(level==0){
@@ -88,19 +95,21 @@ static UINT64 vf_M_residue(const UINT64 *q,const UINT64 *r,UINT64 level,
             if(total==(~(UINT64)0)){*ok=0;return 0;}
             total++;
             if(stats)stats->divisibility_tests++;
-            m=(offset%q[0]+total%q[0])%q[0];
-            if((r[0]+m)%q[0]!=0)return total;
+            m=vf_mod_add(offset,total,q[0]);
+            if(vf_mod_add(r[0],m,q[0])!=0)return total;
             if(stats)stats->survivor_hops++;
         }
     }
     for(;;){
-        d=vf_M_residue(q,r,level-1,offset+total,cancel,ok,stats);
+        if(total>(~(UINT64)0)-offset){*ok=0;return 0;}
+        child_offset=offset+total;
+        d=vf_M_residue(q,r,level-1,child_offset,cancel,ok,stats);
         if(!*ok)return 0;
         if(d>(~(UINT64)0)-total){*ok=0;return 0;}
         total+=d;
         if(stats){stats->survivor_hops++;stats->divisibility_tests++;}
-        m=(offset%q[level]+total%q[level])%q[level];
-        if((r[level]+m)%q[level]!=0)return total;
+        m=vf_mod_add(offset,total,q[level]);
+        if(vf_mod_add(r[level],m,q[level])!=0)return total;
     }
 }
 
@@ -162,7 +171,7 @@ int vf_residue_next(VfResidueState *s, volatile int *cancel,
         for(;;){
             if(stats)stats->divisibility_tests++;
             m=off%s->q[level];
-            if((s->r[level]+m)%s->q[level]!=0)break;
+            if(vf_mod_add(s->r[level],m,s->q[level])!=0)break;
             d=vf_M_residue(s->q,s->r,level-1,off,cancel,&ok,stats);
             if(!ok || d>(~(UINT64)0)-off)return 0;
             off+=d;rounds++;
@@ -172,7 +181,7 @@ int vf_residue_next(VfResidueState *s, volatile int *cancel,
 
     /* Translation update. All future divisibility state is updated with the
        small gap only; the large p participates only in this final output add. */
-    for(i=0;i<s->count;i++)s->r[i]=(s->r[i]+(off%s->q[i]))%s->q[i];
+    for(i=0;i<s->count;i++)s->r[i]=vf_mod_add(s->r[i],off,s->q[i]);
     if(!vf_add_u64(s->p,off,&nextp))return 0;
     s->p=nextp;s->last_gap=off;s->last_correction_rounds=rounds;
     *gap=off;if(correction_rounds)*correction_rounds=rounds;
