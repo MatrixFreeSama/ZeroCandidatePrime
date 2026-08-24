@@ -61,7 +61,9 @@ r_j(p + d) = (r_j(p) + d) mod q_j
 
 inside the finite-width survivor recurrence. The large integer is therefore used to establish the initial residue field and to receive the final output addition, but is not repeatedly used by the inner divisibility recursion.
 
-This branch does **not** claim exact prime succession without closure. Finite dimension width can miss a later divisor, so its verification-free outputs remain `PROVISIONAL / UNVERIFIED`. The formal conjecture and the cloud benchmark are documented in [`docs/VF1_RESIDUE_CONJECTURE.md`](docs/VF1_RESIDUE_CONJECTURE.md) and [`docs/VF1_RESIDUE_BENCHMARK_2026-08-25.md`](docs/VF1_RESIDUE_BENCHMARK_2026-08-25.md).
+This branch does **not** claim exact prime succession without closure. Finite dimension width can miss a later divisor, so its verification-free outputs remain `PROVISIONAL / UNVERIFIED`. The formal conjecture and cloud measurements are documented in [`docs/VF1_RESIDUE_CONJECTURE.md`](docs/VF1_RESIDUE_CONJECTURE.md), [`docs/VF1_RESIDUE_BENCHMARK_2026-08-25.md`](docs/VF1_RESIDUE_BENCHMARK_2026-08-25.md), and [`docs/VF1_EVENT_STAIRCASE_2026-08-25.md`](docs/VF1_EVENT_STAIRCASE_2026-08-25.md).
+
+The event-staircase diagnostic records the observed fact that finite-width gaps are monotone plateaus in `K` interrupted by sparse collision jumps. Its block-GCD locator is explicitly diagnostic because it uses a conventional prime fixture and batched factor-location information; it is not presented as the final VF-1 generation operator.
 
 ## NVIDIA path
 
@@ -78,22 +80,23 @@ The host side loads the NVIDIA Driver API dynamically from `nvcuda.dll`. The GPU
 ## Source layout
 
 ```text
-source/main.c                    Win32 UI, task routing, gates and result presentation
-source/own_solver.c              CPU implementation of the survivor recurrence
-source/vf_residue_state.c        verification-free finite-width residue experiment
-source/gpu_solver.c              NVIDIA Driver API host implementation
-source/gpu_kernel.ptx            CUDA/PTX device implementation
-source/traditional.c             isolated bootstrap / validation routines
-source/winmini.h                 minimal Win32 declarations
-source/build.sh                  freestanding Windows x64 build
-experiments/vf1_residue_gmp.c    arbitrary-precision cloud benchmark mirror
+source/main.c                         Win32 UI, task routing, gates and result presentation
+source/own_solver.c                   CPU implementation of the survivor recurrence
+source/vf_residue_state.c             verification-free finite-width residue experiment
+source/gpu_solver.c                   NVIDIA Driver API host implementation
+source/gpu_kernel.ptx                 CUDA/PTX device implementation
+source/traditional.c                  isolated bootstrap / validation routines
+source/winmini.h                      minimal Win32 declarations
+source/build.sh                       freestanding Windows x64 build
+experiments/vf1_residue_gmp.c         arbitrary-precision cloud benchmark mirror
+experiments/vf1_event_staircase_gmp.c event-staircase / plateau-skipping diagnostic
 ```
 
-The build has no Python dependency. A small host-side C utility converts the checked-in PTX text into the C header embedded by `gpu_solver.c`. The GMP benchmark is isolated under `experiments/` and is not part of the Windows application build.
+The build has no Python dependency. A small host-side C utility converts the checked-in PTX text into the C header embedded by `gpu_solver.c`. The GMP benchmarks are isolated under `experiments/` and are not part of the Windows application build.
 
 ## Scope of the claim
 
-This repository contains an implementation and an experimental representation of the recurrence. It does **not** claim that constant sequential depth has been proved. Matrix-Free storage, GPU parallelism, a bounded experimental recursion depth, and a finite residue-state width are implementation properties; an asymptotic statement about scale-independent causal depth requires a separate proof.
+This repository contains an implementation and an experimental representation of the recurrence. It does **not** claim that constant sequential depth has been proved. Matrix-Free storage, GPU parallelism, a bounded experimental recursion depth, a finite residue-state width, and sparse observed collision events are implementation or experimental properties; an asymptotic statement about scale-independent causal depth requires a separate proof.
 
 ## Platform
 
