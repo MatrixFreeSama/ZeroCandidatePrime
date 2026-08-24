@@ -6,6 +6,7 @@ typedef struct VfResidueState {
     OwnU128 p;
     UINT64 *q;
     UINT64 *r;
+    void *frames;
     UINT64 count;
     UINT64 capacity;
     UINT64 last_gap;
