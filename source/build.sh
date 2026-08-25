@@ -19,6 +19,7 @@ for n in kernel32 user32 gdi32; do
 
 CFLAGS="-target x86_64-pc-windows-msvc -fshort-wchar -ffreestanding -fno-stack-protector -fno-builtin -nostdlibinc -O2"
 $CLANG $CFLAGS -c own_solver.c -o own_solver.obj
+$CLANG $CFLAGS -c vf_residue_state.c -o vf_residue_state.obj
 $CLANG $CFLAGS -c gpu_solver.c -o gpu_solver.obj
 $CLANG $CFLAGS -c traditional.c -o traditional.obj
 $CLANG $CFLAGS -c main.c -o main.obj
@@ -28,5 +29,5 @@ if [ -f app.res ]; then RESARG="app.res"; fi
 
 $LLD /subsystem:windows /entry:WinMainCRTStartup /machine:x64 /nodefaultlib /opt:ref /opt:icf \
   /manifest:embed /manifestinput:app.manifest \
-  main.obj own_solver.obj gpu_solver.obj traditional.obj $RESARG imports/kernel32.lib imports/user32.lib imports/gdi32.lib \
+  main.obj own_solver.obj vf_residue_state.obj gpu_solver.obj traditional.obj $RESARG imports/kernel32.lib imports/user32.lib imports/gdi32.lib \
   /out:ZeroCandidatePrime.exe
